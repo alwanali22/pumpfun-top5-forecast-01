@@ -1,205 +1,229 @@
 import json
 import math
-import random
 import os
+import random
+import sys
+import bisect
 from datetime import datetime
 
-def parse_iso(iso_str):
-    return datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+def parse_iso(s):
+    return datetime.fromisoformat(s.replace('Z', '+00:00'))
 
-def log_size(mcap_str):
-    return math.log10(int(mcap_str)) - 9
-
-def main():
-    input_dir = os.environ.get("MAKEFUN_INPUT_DIR", "/input")
-    output_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    with open(os.path.join(input_dir, "task.json")) as f:
+def load_data(input_dir):
+    with open(os.path.join(input_dir, 'task.json'), 'r') as f:
         task = json.load(f)
     
-    with open(os.path.join(input_dir, "history.ndjson")) as f:
-        marks = [json.loads(line) for line in f if json.loads(line).get("ok") and json.loads(line).get("rows")]
+    history = []
+    with open(os.path.join(input_dir, 'history.ndjson'), 'r') as f:
+        for line in f:
+            mark = json.loads(line)
+            if not mark.get('ok') or 'rows' not in mark:
+                continue
+            history.append(mark)
     
-    if not marks:
-        raise Exception("No usable marks")
+    history.sort(key=lambda m: parse_iso(m['at']))
+    return task, history
 
-    cut_time = parse_iso(task["history_until"])
-    t0 = parse_iso(marks[0]["at"])
+def run_simulation():
+    input_dir = os.environ.get('MAKEFUN_INPUT_DIR', '/input')
+    output_dir = os.environ.get('MAKEFUN_OUTPUT_DIR', '/output')
+    
+    task, history = load_data(input_dir)
+    history_until = parse_iso(task['history_until'])
     
     # Trajectories
-    trajectories = {}
-    for mark in marks:
-        t = (parse_iso(mark["at"]) - t0).total_seconds() / 3600
-        for row in mark["rows"]:
-            mint = row["mint"]
-            if mint not in trajectories:
-                trajectories[mint] = []
-            trajectories[mint].append((t, log_size(row["market_cap_lamports"]), parse_iso(row["created_at"]), row.get("venue", "pool")))
-
-    last_mark = marks[-1]
-    last_time = (parse_iso(last_mark["at"]) - t0).total_seconds() / 3600
-    
+    mints = {} # mint -> list of (t_hours, logsize, venue), created_at
+    first_at = parse_iso(history[0]['at'])
+    for mark in history:
+        at = parse_iso(mark['at'])
+        t_hours = (at - first_at).total_seconds() / 3600
+        for row in mark['rows']:
+            mint = row['mint']
+            if mint not in mints:
+                mints[mint] = {'points': [], 'created_at': parse_iso(row['created_at'])}
+            logsize = math.log10(int(row['market_cap_lamports'])) - 9
+            mints[mint]['points'].append((t_hours, logsize, row['venue']))
+            
     # Candidates
-    candidate_mints = set()
-    for mark in marks[-3:]:
-        for row in mark["rows"]:
-            candidate_mints.add(row["mint"])
+    last_marks = history[-3:]
+    candidates = {}
+    for mark in last_marks:
+        for row in mark['rows']:
+            if row['mint'] not in candidates:
+                candidates[row['mint']] = row
     
-    candidates = []
-    for mint in candidate_mints:
-        traj = trajectories[mint]
-        # Most recent
-        x0 = traj[-1][1]
+    sorted_candidates = []
+    for mint, row in candidates.items():
+        sorted_candidates.append((mint, math.log10(int(row['market_cap_lamports'])) - 9))
+    sorted_candidates.sort(key=lambda x: x[1], reverse=True)
+    top_candidates = sorted_candidates[:250]
+    
+    # Per candidate: x0, slope, d_inf, extra_sd
+    candidate_params = {}
+    last_mark_time = parse_iso(history[-1]['at'])
+    for mint, _ in top_candidates:
+        points = mints[mint]['points']
+        x0 = points[-1][1]
         
-        # Slope
-        recent_points = [p for p in traj if last_time - p[0] <= 1.0]
+        # Robust slope
+        recent_points = [p for p in points if (last_mark_time - parse_iso(next(m['at'] for m in history if (parse_iso(m['at']) - parse_iso(history[0]['at'])).total_seconds()/3600 >= p[0] - 0.0001 ))).total_seconds() <= 3600]
         if len(recent_points) >= 2:
-            # OLS
             n = len(recent_points)
-            sum_t = sum(p[0] for p in recent_points)
-            sum_x = sum(p[1] for p in recent_points)
-            sum_tx = sum(p[0] * p[1] for p in recent_points)
-            sum_t2 = sum(p[0]**2 for p in recent_points)
-            slope = (n * sum_tx - sum_t * sum_x) / (n * sum_t2 - sum_t**2)
-        elif len(traj) >= 2:
-            slope = (traj[-1][1] - traj[-2][1]) / (traj[-1][0] - traj[-2][0])
+            sum_x = sum(p[0] for p in recent_points)
+            sum_y = sum(p[1] for p in recent_points)
+            sum_xy = sum(p[0]*p[1] for p in recent_points)
+            sum_xx = sum(p[0]*p[0] for p in recent_points)
+            slope = (n*sum_xy - sum_x*sum_y) / (n*sum_xx - sum_x*sum_x)
         else:
             slope = 0
         slope = max(-0.5, min(0.5, slope))
         
-        # d_inf
-        last_venue = traj[-1][3]
-        d_inf = -0.05 if last_venue == "pool" else -0.11
+        d_inf = -0.05 if points[-1][2] == "pool" else -0.11
+        age = (last_mark_time - mints[mint]['created_at']).total_seconds() / 3600
+        extra_sd = 0.25 if age < 1.0 else 0.0
         
-        # extra_sd
-        created_at = traj[0][2]
-        extra_sd = 0.15 if (parse_iso(last_mark["at"]) - created_at).total_seconds() / 3600 < 1.0 else 0.0
-        
-        candidates.append({"mint": mint, "x0": x0, "slope": slope, "d_inf": d_inf, "extra_sd": extra_sd})
-    
-    # Sort candidates by x0
-    candidates.sort(key=lambda c: c["x0"], reverse=True)
-    candidates = candidates[:250]
+        candidate_params[mint] = {'x0': x0, 'slope': slope, 'd_inf': d_inf, 'extra_sd': extra_sd}
     
     # Monte Carlo
-    rng = random.Random(12345)
-    dts = sorted([(parse_iso(r) - cut_time).total_seconds() / 3600 for r in task["reads"]])
-    max_dt = dts[-1]
-    step_h = 1.0 if max_dt > 2 else max(0.05, max_dt / 6.0)
-    n_steps = math.ceil(max_dt / step_h)
-    read_steps = [min(n_steps - 1, math.floor(dt / step_h)) for dt in dts]
+    random.seed(12345)
+    paths = 6000
+    dts = []
+    for read_iso in task['reads']:
+        dt = (parse_iso(read_iso) - history_until).total_seconds() / 3600
+        if dt > 0:
+            dts.append(dt)
+    dts.sort()
     
-    n_paths = 6000
-    place_counts = {k: {} for k in range(1, 6)}
+    max_dt = dts[-1] if dts else 0
+    step_h = 1.0 if max_dt > 2 else max(0.05, max_dt/6)
+    n_steps = math.ceil(max_dt / step_h)
+    record_steps = set()
+    for dt in dts:
+        record_steps.add(min(n_steps-1, int(dt // step_h)))
+    record_steps = sorted(list(record_steps))
+    
+    place_counts = {k: {mint: 0 for mint in candidate_params} for k in range(1, 6)}
     size_samples = {k: [] for k in range(1, 6)}
     
-    for _ in range(n_paths):
-        # Current state of candidates
-        current = {c["mint"]: c["x0"] for c in candidates}
-        for s in range(n_steps):
-            t_mid = (s + 0.5) * step_h
-            for c in candidates:
-                mint = c["mint"]
-                # Update: new_x = x + (slope * exp(-t_mid / 1.5) + d_inf) * step_h + gauss(0, sd)
-                sd = math.sqrt(0.70**2 * step_h + c["extra_sd"]**2 * step_h)
-                drift = (c["slope"] * math.exp(-t_mid / 1.5) + c["d_inf"]) * step_h
-                noise = rng.gauss(0, sd)
-                current[mint] += drift + noise
+    for _ in range(paths):
+        xs = {mint: candidate_params[mint]['x0'] for mint in candidate_params}
+        for step in range(n_steps):
+            t_mid = (step + 0.5) * step_h
+            for mint, params in candidate_params.items():
+                sd_i = math.sqrt((1.0**2 + params['extra_sd']**2) * step_h)
+                xs[mint] += (params['slope'] * math.exp(-t_mid / 1.5) + params['d_inf']) * step_h + random.gauss(0, sd_i)
             
-            if s in read_steps:
-                # Rank
-                sorted_mints = sorted(current.keys(), key=lambda m: current[m], reverse=True)
+            if step in record_steps:
+                sorted_mints = sorted(xs.items(), key=lambda x: x[1], reverse=True)
                 for k in range(1, 6):
-                    mint = sorted_mints[k-1]
-                    place_counts[k][mint] = place_counts[k].get(mint, 0) + 1
-                    size_samples[k].append(current[mint])
-    
-    sorted_last_rows = sorted(last_mark["rows"], key=lambda r: r.get("rank", 0))
+                    if k-1 < len(sorted_mints):
+                        mint, x = sorted_mints[k-1]
+                        place_counts[k][mint] += 1
+                        size_samples[k].append(min(5.0, max(0.0, x)))
+
+    # Post-simulation
+    total_draws = paths * len(record_steps)
+    U = []
+    for dt in dts:
+        U.append(min(0.70, 0.45 + 0.35 * math.log10(1 + dt)))
+    u_avg = sum(U) / len(U) if U else 0.70
     
     # Probabilities
-    total_draws = n_paths * len(set(read_steps))
-    probabilities = []
-    
-    def U(dt): return min(0.70, 0.45 + 0.35 * math.log10(1 + dt))
-    u_avg = sum(U(dt) for dt in dts) / len(dts)
-    
+    output_probs = []
     for k in range(1, 6):
-        raw = {m: place_counts[k].get(m, 0) / total_draws for m in place_counts[k]}
-        sorted_mints = sorted(raw.keys(), key=lambda m: raw[m], reverse=True)
-        
-        # Named rows
-        named = []
-        for m in sorted_mints:
-            p = raw[m] * (1 - u_avg)
-            if p >= 0.001:
-                named.append({"mint": m, "place": k, "p": round(p, 6)})
-        
-        # Cap at 100
-        named = sorted(named, key=lambda x: x["p"], reverse=True)[:100]
-        probabilities.extend(named)
-        
-        # Zero-fill
-        chart_likely = [r["mint"] for r in sorted_last_rows][:80]
-        count = len([r for r in probabilities if r["place"] == k])
-        for m in chart_likely:
-            if count >= 100: break
-            if m not in [r["mint"] for r in probabilities if r["place"] == k] and raw.get(m, 0) < 0.001:
-                probabilities.append({"mint": m, "place": k, "p": 0.0})
-                count += 1
-                
+        raw = {mint: place_counts[k][mint] / total_draws for mint in candidate_params}
+        sorted_raw = sorted(raw.items(), key=lambda x: x[1], reverse=True)
+        rows_k = 0
+        for mint, r in sorted_raw:
+            if rows_k >= 100: break
+            p = r * (1 - u_avg)
+            if p < 0.001: break
+            output_probs.append({"mint": mint, "place": k, "p": round(p, 6)})
+            rows_k += 1
+        last_rows = sorted(last_marks[-1]['rows'], key=lambda x: int(x['rank']))
+        for i in range(min(100, len(last_rows))):
+            if rows_k >= 100: break  # contract: at most 100 rows per place (named + zero-fill)
+            mint = last_rows[i]['mint']
+            if mint not in raw or raw[mint] < 0.001:
+                # Add check to see if this mint is already named
+                if not any(item['mint'] == mint and item['place'] == k for item in output_probs):
+                    output_probs.append({"mint": mint, "place": k, "p": 0.0})
+                    rows_k += 1
+                    
     # Top 5
-    scores = {}
-    for k in range(1, 6):
-        for m, count in place_counts[k].items():
-            scores[m] = scores.get(m, 0) + (count / total_draws) * (6 - k)
-    
-    top5_mints = sorted(scores.keys(), key=lambda m: scores[m], reverse=True)[:5]
+    score = {}
+    for mint in candidate_params:
+        score[mint] = sum((place_counts[k][mint] / total_draws) * (6 - k) for k in range(1, 6))
+    top5_mints = sorted(score.keys(), key=lambda m: score[m], reverse=True)[:5]
     
     # Sizes
-    sizes = []
+    edges = [2.00 + i * 0.05 for i in range(81)]
+    # I need to implement a standard normal CDF (Phi).
+    def phi(x):
+        return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+        
+    output_sizes = []
     for k in range(1, 6):
         # Histogram
-        hist = [0] * 82
-        for val in size_samples[k]:
-            if val < 2.00: bin = 0
-            elif val >= 6.00: bin = 81
-            else: bin = int((val - 2.00) / 0.05) + 1
-            hist[bin] += 1
+        bins = [0] * 82
+        for s in size_samples[k]:
+            b = bisect.bisect_right(edges, s)
+            bins[b] += 1
         
-        # Weights
-        bin_shares = [(h / len(size_samples[k])) * (1 - u_avg) for h in hist]
+        # Share from MC
+        shares = [b / len(size_samples[k]) * (1 - u_avg) for b in bins]
         
-        # Newcomer component
-        # mu_n = (log-size of the coin at rank k in last_rows) + 0.10, sd_n = 0.70
-        last_row = sorted_last_rows[k-1] if len(sorted_last_rows) >= k else None
-        mu_n = (log_size(last_row["market_cap_lamports"]) + 0.10) if last_row else 2.0
-        sd_n = 0.70
+        # Newcomer
+        # Wait, the spec says "last place-k cap" which is logsize of k-th row of last mark.
+        last_mark_rows = sorted(last_marks[-1]['rows'], key=lambda x: int(x['rank']))
+        if len(last_mark_rows) >= k:
+            cap_k = math.log10(int(last_mark_rows[k-1]['market_cap_lamports'])) - 9
+        else:
+            cap_k = 3.0
         
-        def Phi(x, mu, sd): return 0.5 * (1 + math.erf((x - mu) / (sd * math.sqrt(2))))
+        # mu = median of size_samples[k] + 0.30, clamped to [cap_k - 0.5, cap_k + 0.75]
+        sorted_samples = sorted(size_samples[k])
+        median_sample = sorted_samples[len(sorted_samples)//2]
+        mu = max(cap_k - 0.5, min(cap_k + 0.75, median_sample + 0.30))
+        sd = 0.35
         
+        # Add newcomer shares
+        # bin 0: < 2.00. bin 81: >= 6.00.
+        # edges = [2.00, 2.05, ..., 6.00]
+        # Phi((hi - mu)/sd) - Phi((lo - mu)/sd)
+        
+        newcomer_shares = [0.0] * 82
         for b in range(82):
             if b == 0:
-                prob = Phi(2.00, mu_n, sd_n)
+                lo, hi = -float('inf'), edges[0]
             elif b == 81:
-                prob = 1 - Phi(6.00, mu_n, sd_n)
+                lo, hi = edges[-1], float('inf')
             else:
-                prob = Phi(2.00 + 0.05 * b, mu_n, sd_n) - Phi(2.00 + 0.05 * (b - 1), mu_n, sd_n)
+                lo, hi = edges[b-1], edges[b]
             
-            bin_shares[b] += prob * u_avg
+            # Phi is standard normal CDF
+            prob = phi((hi - mu)/sd) - phi((lo - mu)/sd)
+            newcomer_shares[b] = prob * u_avg
             
-        # Normalize
-        total_share = sum(bin_shares)
-        for b in range(82):
-            share = bin_shares[b] / total_share
-            if share >= 0.001:
-                sizes.append({"place": k, "bin": b, "p": round(share, 6)})
-                
-    # Final write
-    output = {"probabilities": probabilities, "top5": top5_mints, "sizes": sizes}
-    with open(os.path.join(output_dir, task["output"]), "w") as f:
-        f.write(json.dumps(output) + "\n")
+        # Add and normalize
+        total_shares = [shares[b] + newcomer_shares[b] for b in range(82)]
+        norm_sum = sum(total_shares)
+        
+        for b, share in enumerate(total_shares):
+            s = share / norm_sum
+            if s >= 0.001:
+                output_sizes.append({"place": k, "bin": b, "p": round(s, 6)})
+
+    # Output
+    result = {
+        "probabilities": output_probs,
+        "top5": top5_mints,
+        "sizes": output_sizes
+    }
+    
+    with open(os.path.join(output_dir, 'forecast.json'), 'w') as f:
+        json.dump(result, f)
+        f.write('\n')
 
 if __name__ == "__main__":
-    main()
+    run_simulation()

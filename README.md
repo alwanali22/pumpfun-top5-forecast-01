@@ -1,23 +1,13 @@
-# pumpfun-top5-forecast-01
+# pumpfun-v2 competition entry
 
-This program forecasts the 5 largest pump.fun coins by market cap based on the provided history.
+This entry provides a forecast for the pump.fun top-5 competition.
 
 ## Model
-The model uses a horizon-aware Monte Carlo simulation over log-transformed market caps:
-- **Trajectories:** Tracks log-size points for each candidate.
-- **Drift/Noise:** Calculates per-coin slope, long-run drift (`d_inf`), and age-based volatility (`extra_sd`).
-- **Monte Carlo:** Simulates 6000 paths from the last mark, recording snapshots at future answer-read times.
-- **Probabilities:** Aggregates ranks, applies a newcomer reserve (`U(dt)`), and zero-fills for coins missing from the simulation.
-- **Sizes:** Computes size distributions with newcomer mixture components, normalizing probabilities.
+The model uses a horizon-aware Monte Carlo simulation over the log10 market cap in SOL. It calculates trajectories for candidates based on recent market behavior, including venue-specific drifts and noise. The final forecast is based on the simulated rank distributions at the specified horizon, with a correction for newcomers.
 
-## Running
+## How to run
 ```bash
-MAKEFUN_INPUT_DIR=<path_to_input> MAKEFUN_OUTPUT_DIR=<path_to_output> python3 main.py
+MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
 ```
 
-## Validation
-- Determinism check: Two runs on the same input produced byte-identical output files (`diff` result empty).
-- Row counts per place: 79, 79, 79, 78, 77.
-- Named p sum per place: [~0.49, ~0.49, ~0.48, ~0.48, ~0.47] (sum <= 1.0).
-- Size p sum per place: [~0.99, ~0.99, ~0.99, ~0.99, ~0.99] (sum <= 1.0).
-- Runtime: Well under 300 seconds.
+This entry is implemented using only Python standard library modules and is deterministic (fixed random seed, no external dependencies).
