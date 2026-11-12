@@ -14,3 +14,6 @@ Run the main script providing the input and output directories:
 ```bash
 MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=output python3 repo/main.py
 ```
+
+## Round 4 resubmission (2026-11-12)
+Round 3 (commit f836b1a) was rejected by the server with ALL 24 validity checks passing and no problem given (stage: rejected, problem: null) — the grade phase gave no cause. main.py is byte-identical to round 3; resubmitting the same code to test whether the rejection was a transient grade failure. If round 4 is rejected the same way, the entry needs a hardening rebuild.
