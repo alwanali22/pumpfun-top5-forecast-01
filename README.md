@@ -1,13 +1,16 @@
-# pumpfun-v2 competition entry
+# Pumpfun V3 Model
 
-This entry provides a forecast for the pump.fun top-5 competition.
+This model forecasts the top 5 largest pump.fun coins by market cap 24 hours out.
 
-## Model
-The model uses a horizon-aware Monte Carlo simulation over the log10 market cap in SOL. It calculates trajectories for candidates based on recent market behavior, including venue-specific drifts and noise. The final forecast is based on the simulated rank distributions at the specified horizon, with a correction for newcomers.
+## Model Description
+- **Horizon-aware Monte Carlo:** Simulates log market caps over time, accounting for decaying growth rates and long-run drift.
+- **Newcomer Reserve:** Incorporates probability for coins not yet born.
+- **Zero-Fill Rows:** Ensures at least 100 rows per place.
+- **Sizes:** Histogram mixed with a newcomer normal distribution, anchored at the last observed cap, with Monte Carlo weight decaying after 2 hours.
 
-## How to run
+## How to Run
+Run the main script providing the input and output directories:
+
 ```bash
-MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out python3 main.py
+MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=output python3 repo/main.py
 ```
-
-This entry is implemented using only Python standard library modules and is deterministic (fixed random seed, no external dependencies).
